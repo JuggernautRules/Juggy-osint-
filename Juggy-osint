@@ -1,0 +1,451 @@
+#!/data/data/com.termux/files/usr/bin/python3
+# OSINT Tool для Termux
+# Автор: @The_juggy
+# Версия: 6.1
+
+import requests
+from colorama import init, Fore, Style
+import time
+import os
+import sys
+import platform
+from concurrent.futures import ThreadPoolExecutor
+import phonenumbers
+from phonenumbers import carrier, geocoder, timezone
+from bs4 import BeautifulSoup
+import json
+
+# Инициализация
+init(autoreset=True)
+IS_MOBILE = 'android' in platform.system().lower()
+
+# Конфигурация API
+CONFIG = {
+    "HIBP_API_KEY": "",  # Получите на https://haveibeenpwned.com/API/Key
+    "SHODAN_API_KEY": "",  # Получите на https://account.shodan.io/
+    "VIRUSTOTAL_API_KEY": ""  # Получите на https://www.virustotal.com/
+}
+
+JUGGY_LOGO = f"""{Fore.RED}
+   ██╗██╗   ██╗ ██████╗  ██████╗ ██╗   ██╗
+   ██║██║   ██║██╔════╝ ██╔════╝ ╚██╗ ██╔╝
+   ██║██║   ██║██║  ███╗██║  ███╗ ╚████╔╝ 
+██╗██║██║   ██║██║   ██║██║   ██║  ╚██╔╝  
+╚████╔╝╚██████╔╝╚██████╔╝╚██████╔╝   ██║   
+ ╚═══╝  ╚═════╝  ╚═════╝  ╚═════╝    ╚═╝   
+{Fore.RESET}""" if not IS_MOBILE else f"{Fore.RED}JUGGY OSINT v6.1 | @The_juggy{Fore.RESET}"
+
+# Глобальные настройки
+HEADERS = {
+    'User-Agent': 'Mozilla/5.0 (Linux; Android 10; Mobile) AppleWebKit/537.36'
+}
+TIMEOUT = 15
+MAX_THREADS = 3  # Уменьшено для мобильных устройств
+
+def clear_screen():
+    os.system('cls' if os.name == 'nt' else 'clear')
+
+def show_banner():
+    clear_screen()
+    print(JUGGY_LOGO)
+    print(f"{Fore.YELLOW}OSINT Tool для Termux | Автор: @The_juggy{Fore.RESET}\n")
+
+def show_menu():
+    show_banner()
+    print(f"{Fore.CYAN}╔{'═'*35}╗")
+    print(f"║ {Fore.YELLOW}🏠 ГЛАВНОЕ МЕНЮ {Fore.CYAN}{' '*17}║")
+    print(f"╠{'═'*35}╣")
+    print(f"║ {Fore.GREEN}1.{Fore.CYAN} Поиск по номеру телефона  ║")
+    print(f"║ {Fore.GREEN}2.{Fore.CYAN} Поиск по email           ║")
+    print(f"║ {Fore.GREEN}3.{Fore.CYAN} Поиск по никнейму        ║")
+    print(f"║ {Fore.GREEN}4.{Fore.CYAN} Поиск в Telegram         ║")
+    print(f"║ {Fore.GREEN}5.{Fore.CYAN} Проверка IP/домена       ║")
+    print(f"║ {Fore.GREEN}6.{Fore.CYAN} Настройки API            ║")
+    print(f"║ {Fore.GREEN}7.{Fore.CYAN} Выход                    ║")
+    print(f"╚{'═'*35}╝{Fore.RESET}")
+    
+    while True:
+        choice = input(f"\n{Fore.YELLOW}➤ Выберите действие (1-7): {Fore.RESET}")
+        if choice in ['1', '2', '3', '4', '5', '6', '7']:
+            return choice
+        print(f"{Fore.RED}❌ Неверный ввод!{Fore.RESET}")
+
+def safe_request(url, method='GET', headers=None, params=None):
+    try:
+        response = requests.request(
+            method,
+            url,
+            headers=headers or HEADERS,
+            params=params,
+            timeout=TIMEOUT,
+            allow_redirects=False
+        )
+        return response
+    except Exception as e:
+        print(f"{Fore.YELLOW}[!] Ошибка запроса: {e}{Fore.RESET}")
+        return None
+
+def check_site(site, url, identifier):
+    response = safe_request(url.format(identifier))
+    if response:
+        if response.status_code == 200:
+            return (True, site, url.format(identifier))
+        return (False, site, None)
+    return (None, site, "Ошибка соединения")
+
+def phone_lookup(phone):
+    try:
+        parsed = phonenumbers.parse("+" + phone, None)
+        return {
+            "operator": carrier.name_for_number(parsed, "ru") or "Неизвестно",
+            "region": geocoder.description_for_number(parsed, "ru") or "Неизвестно",
+            "timezone": ', '.join(timezone.time_zones_for_number(parsed)) or "Неизвестно"
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+def check_hibp(email):
+    if not CONFIG["HIBP_API_KEY"]:
+        return {"error": "API ключ не настроен (HIBP)"}
+    
+    response = safe_request(
+        f"https://haveibeenpwned.com/api/v3/breachedaccount/{email}",
+        headers={'hibp-api-key': CONFIG["HIBP_API_KEY"]}
+    )
+    
+    if response:
+        if response.status_code == 200:
+            return {"breaches": response.json()}
+        elif response.status_code == 404:
+            return {"status": "Утечек не найдено"}
+        return {"error": f"HTTP {response.status_code}"}
+    return {"error": "Ошибка запроса"}
+
+def check_shodan(ip):
+    if not CONFIG["SHODAN_API_KEY"]:
+        return {"error": "API ключ не настроен (Shodan)"}
+    
+    response = safe_request(
+        f"https://api.shodan.io/shodan/host/{ip}",
+        params={'key': CONFIG["SHODAN_API_KEY"]}
+    )
+    
+    if response:
+        if response.status_code == 200:
+            return response.json()
+        return {"error": f"HTTP {response.status_code}"}
+    return {"error": "Ошибка запроса"}
+
+def check_virustotal(domain):
+    if not CONFIG["VIRUSTOTAL_API_KEY"]:
+        return {"error": "API ключ не настроен (VirusTotal)"}
+    
+    response = safe_request(
+        f"https://www.virustotal.com/api/v3/domains/{domain}",
+        headers={'x-apikey': CONFIG["VIRUSTOTAL_API_KEY"]}
+    )
+    
+    if response:
+        if response.status_code == 200:
+            return response.json()
+        return {"error": f"HTTP {response.status_code}"}
+    return {"error": "Ошибка запроса"}
+
+def phone_search():
+    show_banner()
+    print(f"{Fore.CYAN}╔{'═'*50}╗")
+    print(f"║ {Fore.YELLOW}🔍 ПОИСК ПО НОМЕРУ ТЕЛЕФОНА {Fore.CYAN}{' '*21}║")
+    print(f"╚{'═'*50}╝{Fore.RESET}")
+    
+    phone = input(f"{Fore.GREEN}Введите номер (7XXXXXXXXXX): {Fore.RESET}").strip()
+    if not phone.isdigit() or len(phone) != 11:
+        print(f"{Fore.RED}❌ Неверный формат! Пример: 79123456789{Fore.RESET}")
+        time.sleep(1)
+        return
+
+    # Базовая информация
+    print(f"\n{Fore.MAGENTA}⌛️ Анализируем номер...{Fore.RESET}")
+    phone_info = phone_lookup(phone)
+    
+    if "error" in phone_info:
+        print(f"{Fore.RED}⚠️ Ошибка: {phone_info['error']}{Fore.RESET}")
+    else:
+        print(f"\n{Fore.YELLOW}📱 Информация:{Fore.RESET}")
+        print(f"{Fore.GREEN}• Оператор: {phone_info['operator']}")
+        print(f"• Регион: {phone_info['region']}")
+        print(f"• Часовой пояс: {phone_info['timezone']}{Fore.RESET}")
+
+    # Проверка в сервисах
+    print(f"\n{Fore.YELLOW}🌐 Поиск в соцсетях:{Fore.RESET}")
+    
+    services = {
+        "WhatsApp": "https://wa.me/{}",
+        "Telegram": "https://t.me/+{}",
+        "VK": "https://vk.com/phone/{}",
+        "Avito": "https://www.avito.ru/user/{}"
+    }
+
+    with ThreadPoolExecutor(max_workers=MAX_THREADS) as executor:
+        results = list(executor.map(
+            lambda item: check_site(item[0], item[1], phone),
+            services.items()
+        ))
+    
+    for result in results:
+        status, site, data = result
+        if status is True:
+            print(f"{Fore.GREEN}[+] {site}: {data}{Fore.RESET}")
+        elif status is False:
+            print(f"{Fore.RED}[-] {site}: Не найдено{Fore.RESET}")
+        else:
+            print(f"{Fore.YELLOW}[!] {site}: {data}{Fore.RESET}")
+
+    input(f"\n{Fore.CYAN}Нажмите Enter для возврата...{Fore.RESET}")
+
+def email_search():
+    show_banner()
+    print(f"{Fore.CYAN}╔{'═'*40}╗")
+    print(f"║ {Fore.YELLOW}📧 ПОИСК ПО EMAIL {Fore.CYAN}{' '*20}║")
+    print(f"╚{'═'*40}╝{Fore.RESET}")
+    
+    email = input(f"{Fore.GREEN}Введите email: {Fore.RESET}").strip()
+    if "@" not in email:
+        print(f"{Fore.RED}❌ Неверный формат! Пример: test@example.com{Fore.RESET}")
+        time.sleep(1)
+        return
+
+    # Проверка утечек
+    print(f"\n{Fore.MAGENTA}⌛️ Проверяем утечки...{Fore.RESET}")
+    hibp_result = check_hibp(email)
+    
+    if "error" in hibp_result:
+        print(f"{Fore.YELLOW}⚠️ HIBP: {hibp_result['error']}{Fore.RESET}")
+    elif "breaches" in hibp_result:
+        print(f"{Fore.RED}[!] Найдено утечек: {len(hibp_result['breaches'])}{Fore.RESET}")
+        for breach in hibp_result['breaches'][:3]:
+            print(f"- {breach['Name']} ({breach['BreachDate']})")
+    else:
+        print(f"{Fore.GREEN}[+] Утечек не найдено{Fore.RESET}")
+
+    # Поиск в соцсетях
+    print(f"\n{Fore.YELLOW}🔎 Поиск аккаунтов:{Fore.RESET}")
+    
+    sites = {
+        "GitHub": "https://github.com/{}",
+        "Twitter": "https://twitter.com/{}",
+        "Instagram": "https://instagram.com/{}",
+        "VK": "https://vk.com/{}"
+    }
+    username = email.split('@')[0]
+
+    with ThreadPoolExecutor(max_workers=MAX_THREADS) as executor:
+        results = list(executor.map(
+            lambda item: check_site(item[0], item[1], username),
+            sites.items()
+        ))
+    
+    for result in results:
+        status, site, data = result
+        if status is True:
+            print(f"{Fore.GREEN}[+] {site}: {data}{Fore.RESET}")
+        elif status is False:
+            print(f"{Fore.RED}[-] {site}: Не найдено{Fore.RESET}")
+        else:
+            print(f"{Fore.YELLOW}[!] {site}: {data}{Fore.RESET}")
+
+    input(f"\n{Fore.CYAN}Нажмите Enter для возврата...{Fore.RESET}")
+
+def username_search():
+    show_banner()
+    print(f"{Fore.CYAN}╔{'═'*40}╗")
+    print(f"║ {Fore.YELLOW}👤 ПОИСК ПО НИКНЕЙМУ {Fore.CYAN}{' '*16}║")
+    print(f"╚{'═'*40}╝{Fore.RESET}")
+    
+    username = input(f"{Fore.GREEN}Введите никнейм: {Fore.RESET}").strip()
+    if not username:
+        print(f"{Fore.RED}❌ Никнейм не может быть пустым!{Fore.RESET}")
+        time.sleep(1)
+        return
+
+    print(f"\n{Fore.MAGENTA}⌛️ Сканируем 30+ сайтов для: @{username}{Fore.RESET}")
+    
+    sites = {
+        "ВКонтакте": "https://vk.com/{}",
+        "Telegram": "https://t.me/{}",
+        "GitHub": "https://github.com/{}",
+        "Steam": "https://steamcommunity.com/id/{}",
+        "Twitter": "https://twitter.com/{}",
+        "Instagram": "https://instagram.com/{}",
+        "Pinterest": "https://pinterest.com/{}",
+        "Reddit": "https://reddit.com/user/{}"
+    }
+
+    with ThreadPoolExecutor(max_workers=MAX_THREADS) as executor:
+        results = list(executor.map(
+            lambda item: check_site(item[0], item[1], username),
+            sites.items()
+        ))
+    
+    found = False
+    for result in results:
+        status, site, data = result
+        if status is True:
+            print(f"{Fore.GREEN}[+] {site}: {data}{Fore.RESET}")
+            found = True
+        elif status is None:
+            print(f"{Fore.YELLOW}[!] {site}: {data}{Fore.RESET}")
+    
+    if not found:
+        print(f"{Fore.RED}[-] Аккаунты не найдены{Fore.RESET}")
+
+    input(f"\n{Fore.CYAN}Нажмите Enter для возврата...{Fore.RESET}")
+
+def telegram_search():
+    show_banner()
+    print(f"{Fore.CYAN}╔{'═'*50}╗")
+    print(f"║ {Fore.YELLOW}✈️ УГЛУБЛЕННЫЙ ПОИСК В TELEGRAM {Fore.CYAN}{' '*14}║")
+    print(f"╚{'═'*50}╝{Fore.RESET}")
+    
+    username = input(f"{Fore.GREEN}Введите Telegram username (без @): {Fore.RESET}").strip()
+    if not username:
+        print(f"{Fore.RED}❌ Имя пользователя не может быть пустым!{Fore.RESET}")
+        time.sleep(1)
+        return
+
+    print(f"\n{Fore.MAGENTA}⌛️ Анализируем профиль @{username}...{Fore.RESET}")
+    
+    # Проверка профиля
+    tg_url = f"https://t.me/{username}"
+    response = safe_request(tg_url)
+    
+    if response and response.status_code == 200:
+        soup = BeautifulSoup(response.text, 'html.parser')
+        title = soup.find('div', class_='tgme_page_title')
+        description = soup.find('div', class_='tgme_page_description')
+        
+        print(f"\n{Fore.GREEN}[+] Профиль существует: {tg_url}{Fore.RESET}")
+        print(f"\n{Fore.YELLOW}📌 Информация:{Fore.RESET}")
+        print(f"{Fore.CYAN}• Имя: {title.text.strip() if title else 'Не указано'}")
+        print(f"• Описание: {description.text.strip() if description else 'Нет описания'}{Fore.RESET}")
+    else:
+        print(f"\n{Fore.RED}[-] Профиль не найден или приватный{Fore.RESET}")
+
+    input(f"\n{Fore.CYAN}Нажмите Enter для возврата...{Fore.RESET}")
+
+def ip_search():
+    show_banner()
+    print(f"{Fore.CYAN}╔{'═'*50}╗")
+    print(f"║ {Fore.YELLOW}🌐 ПРОВЕРКА IP/ДОМЕНА {Fore.CYAN}{' '*23}║")
+    print(f"╚{'═'*50}╝{Fore.RESET}")
+    
+    target = input(f"{Fore.GREEN}Введите IP или домен: {Fore.RESET}").strip()
+    if not target:
+        print(f"{Fore.RED}❌ Пустой ввод!{Fore.RESET}")
+        time.sleep(1)
+        return
+
+    # Shodan
+    print(f"\n{Fore.MAGENTA}⌛️ Запрашиваем данные Shodan...{Fore.RESET}")
+    shodan_data = check_shodan(target)
+    
+    if "error" in shodan_data:
+        print(f"{Fore.RED}❌ Shodan: {shodan_data['error']}{Fore.RESET}")
+    else:
+        print(f"\n{Fore.YELLOW}📊 Результаты Shodan:{Fore.RESET}")
+        print(f"{Fore.GREEN}• IP: {shodan_data.get('ip_str', 'N/A')}")
+        print(f"• Страна: {shodan_data.get('country_name', 'N/A')}")
+        print(f"• Город: {shodan_data.get('city', 'N/A')}")
+        print(f"• Провайдер: {shodan_data.get('isp', 'N/A')}")
+        print(f"• Портs: {', '.join(map(str, shodan_data.get('ports', [])))}")
+        
+        if 'vulns' in shodan_data:
+            print(f"\n{Fore.RED}⚠️ Уязвимости:{Fore.RESET}")
+            for vuln in list(shodan_data['vulns'].keys())[:3]:
+                print(f"- {vuln}")
+
+    # VirusTotal
+    if "." in target:  # Проверка домена
+        print(f"\n{Fore.MAGENTA}⌛️ Запрашиваем данные VirusTotal...{Fore.RESET}")
+        vt_data = check_virustotal(target)
+        
+        if "error" in vt_data:
+            print(f"{Fore.YELLOW}⚠️ VirusTotal: {vt_data['error']}{Fore.RESET}")
+        else:
+            print(f"\n{Fore.YELLOW}🛡️ Результаты VirusTotal:{Fore.RESET}")
+            stats = vt_data.get('data', {}).get('attributes', {}).get('last_analysis_stats', {})
+            print(f"{Fore.GREEN}• Безопасен: {stats.get('harmless', 0)}")
+            print(f"• Подозрительный: {stats.get('suspicious', 0)}")
+            print(f"• Вредоносный: {stats.get('malicious', 0)}{Fore.RESET}")
+
+    input(f"\n{Fore.CYAN}Нажмите Enter для возврата...{Fore.RESET}")
+
+def api_settings():
+    show_banner()
+    print(f"{Fore.CYAN}╔{'═'*35}╗")
+    print(f"║ {Fore.YELLOW}⚙️ НАСТРОЙКИ API {Fore.CYAN}{' '*17}║")
+    print(f"╠{'═'*35}╣")
+    
+    print(f"║ {Fore.GREEN}1.{Fore.CYAN} Have I Been Pwned: {'✅' if CONFIG['HIBP_API_KEY'] else '❌'} ║")
+    print(f"║ {Fore.GREEN}2.{Fore.CYAN} Shodan: {'✅' if CONFIG['SHODAN_API_KEY'] else '❌'}           ║")
+    print(f"║ {Fore.GREEN}3.{Fore.CYAN} VirusTotal: {'✅' if CONFIG['VIRUSTOTAL_API_KEY'] else '❌'}      ║")
+    print(f"║ {Fore.GREEN}4.{Fore.CYAN} Назад                     ║")
+    print(f"╚{'═'*35}╝{Fore.RESET}")
+    
+    choice = input(f"\n{Fore.YELLOW}➤ Выберите API для настройки (1-4): {Fore.RESET}")
+    
+    if choice == '1':
+        CONFIG['HIBP_API_KEY'] = input("Введите HIBP API ключ: ").strip()
+    elif choice == '2':
+        CONFIG['SHODAN_API_KEY'] = input("Введите Shodan API ключ: ").strip()
+    elif choice == '3':
+        CONFIG['VIRUSTOTAL_API_KEY'] = input("Введите VirusTotal API ключ: ").strip()
+
+def main():
+    try:
+        if IS_MOBILE:
+            os.system("termux-wake-lock")
+        
+        while True:
+            choice = show_menu()
+            
+            if choice == '1':
+                phone_search()
+            elif choice == '2':
+                email_search()
+            elif choice == '3':
+                username_search()
+            elif choice == '4':
+                telegram_search()
+            elif choice == '5':
+                ip_search()
+            elif choice == '6':
+                api_settings()
+            elif choice == '7':
+                print(f"\n{Fore.GREEN}🚪 Выход из программы...{Fore.RESET}")
+                break
+
+    except KeyboardInterrupt:
+        print(f"\n{Fore.RED}🚨 Программа прервана{Fore.RESET}")
+    except Exception as e:
+        print(f"\n{Fore.RED}💥 Критическая ошибка: {e}{Fore.RESET}")
+    finally:
+        if IS_MOBILE:
+            os.system("termux-wake-unlock")
+        sys.exit(0)
+
+if __name__ == "__main__":
+    # Проверка зависимостей
+    try:
+        import requests
+        import phonenumbers
+        from bs4 import BeautifulSoup
+    except ImportError:
+        print(f"{Fore.RED}❌ Необходимо установить зависимости:{Fore.RESET}")
+        print("pip install requests phonenumbers beautifulsoup4 colorama")
+        sys.exit(1)
+    
+    # Проверка API ключей
+    if not any(CONFIG.values()):
+        print(f"{Fore.YELLOW}⚠️ Для полного функционала настройте API ключи{Fore.RESET}")
+    
+    main()
